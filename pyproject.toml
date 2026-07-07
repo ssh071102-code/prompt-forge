@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "prompt-forge"
+version = "0.1.0"
+description = "An iterative prompt optimizer that hill-climbs prompts against labeled examples and a scorer."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Laurin Lin" }]
+keywords = ["llm", "prompt-engineering", "prompt-optimization", "anthropic"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Software Development :: Libraries",
+]
+dependencies = [
+    "pydantic>=2.0",
+    "anthropic>=0.30",
+    "typer>=0.12",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "respx>=0.20"]
+
+[project.scripts]
+prompt-forge = "prompt_forge.cli:app"
+
+[tool.setuptools.packages.find]
+include = ["prompt_forge*"]

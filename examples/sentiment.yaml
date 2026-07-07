@@ -1,0 +1,16 @@
+# Example set for `prompt-forge optimize examples/sentiment.yaml --prompt "..."`.
+# Each entry is a labeled example: the input text and the expected classification.
+- input: "I absolutely loved this movie, best one this year!"
+  expected: "positive"
+- input: "This was a complete waste of time, I want my money back."
+  expected: "negative"
+- input: "The plot was predictable but the acting made it worth watching."
+  expected: "positive"
+- input: "Terrible service, cold food, and a rude waiter."
+  expected: "negative"
+- input: "It was fine, nothing special but not bad either."
+  expected: "neutral"
+- input: "Best purchase I've made all year, exceeded every expectation."
+  expected: "positive"
+- input: "Broke after two days and support never responded."
+  expected: "negative"
