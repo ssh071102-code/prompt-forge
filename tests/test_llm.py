@@ -45,7 +45,7 @@ def test_llm_complete_extracts_text_from_response() -> None:
 
 
 @respx.mock
-def test_llm_complete_folds_system_into_user_turn_not_native_system_param() -> None:
+def test_llm_complete_uses_native_system_param_by_default() -> None:
     route = respx.post(MESSAGES_URL).mock(return_value=_mock_response("ok"))
     client = anthropic.Anthropic(api_key="test-key")
     llm = LLM(client=client)
@@ -53,12 +53,12 @@ def test_llm_complete_folds_system_into_user_turn_not_native_system_param() -> N
     llm.complete(model="claude-haiku-4-5", system="Be terse.", user="Say hi.")
 
     request_body = json.loads(route.calls.last.request.content)
-    assert "system" not in request_body
-    assert request_body["messages"] == [{"role": "user", "content": "Be terse.\n\nSay hi."}]
+    assert request_body["system"] == "Be terse."
+    assert request_body["messages"] == [{"role": "user", "content": "Say hi."}]
 
 
 @respx.mock
-def test_llm_complete_with_empty_system_sends_user_text_unchanged() -> None:
+def test_llm_complete_omits_system_param_when_system_is_empty() -> None:
     route = respx.post(MESSAGES_URL).mock(return_value=_mock_response("ok"))
     client = anthropic.Anthropic(api_key="test-key")
     llm = LLM(client=client)
@@ -66,4 +66,18 @@ def test_llm_complete_with_empty_system_sends_user_text_unchanged() -> None:
     llm.complete(model="claude-haiku-4-5", system="", user="Just the user turn.")
 
     request_body = json.loads(route.calls.last.request.content)
+    assert "system" not in request_body
     assert request_body["messages"] == [{"role": "user", "content": "Just the user turn."}]
+
+
+@respx.mock
+def test_llm_fold_system_into_user_escape_hatch_prepends_to_user_turn() -> None:
+    route = respx.post(MESSAGES_URL).mock(return_value=_mock_response("ok"))
+    client = anthropic.Anthropic(api_key="test-key")
+    llm = LLM(client=client, fold_system_into_user=True)
+
+    llm.complete(model="claude-haiku-4-5", system="Be terse.", user="Say hi.")
+
+    request_body = json.loads(route.calls.last.request.content)
+    assert "system" not in request_body
+    assert request_body["messages"] == [{"role": "user", "content": "Be terse.\n\nSay hi."}]

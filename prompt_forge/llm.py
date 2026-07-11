@@ -23,30 +23,37 @@ class LLMProtocol(Protocol):
 class LLM:
     """Synchronous wrapper around ``anthropic.Anthropic``.
 
-    Instructions are folded into the user turn instead of passed through
-    the API's native ``system`` parameter. This keeps every request a
-    single, self-contained user message -- easier to log, easier to replay,
-    and unaffected by proxies or gateways that don't forward ``system``
-    correctly.
+    By default, system instructions are sent through the API's native
+    ``system`` parameter, which is how the models are trained to receive
+    them. ``fold_system_into_user=True`` is a compatibility escape hatch
+    for API gateways that strip or drop the ``system`` field: it prepends
+    the system text to the user message instead, so no instruction is
+    silently lost in transit.
 
     Pass an already-constructed client (real or fake) via ``client`` to
     avoid touching the network, e.g. in tests.
     """
 
-    def __init__(self, client: Any | None = None) -> None:
+    def __init__(self, client: Any | None = None, *, fold_system_into_user: bool = False) -> None:
         if client is None:
             import anthropic
 
             client = anthropic.Anthropic()
         self._client = client
+        self._fold_system_into_user = fold_system_into_user
 
     def complete(self, model: str, system: str, user: str, *, max_tokens: int = 1024) -> str:
         """Send a single-turn completion request and return its text."""
-        combined = f"{system}\n\n{user}" if system else user
+        kwargs: dict[str, Any] = {}
+        if self._fold_system_into_user:
+            user = f"{system}\n\n{user}" if system else user
+        elif system:
+            kwargs["system"] = system
         response = self._client.messages.create(
             model=model,
             max_tokens=max_tokens,
-            messages=[{"role": "user", "content": combined}],
+            messages=[{"role": "user", "content": user}],
+            **kwargs,
         )
         return _extract_text(response)
 
