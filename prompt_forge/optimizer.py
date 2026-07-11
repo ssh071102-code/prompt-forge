@@ -197,4 +197,6 @@ def optimize(
                 logger.info("No improvement for %d consecutive rounds; stopping.", stalled_rounds)
                 break
 
-    return Result(best_prompt=best_prompt, best_score=best_score, rounds=len(trace) - 1, trace=trace)
+    return Result(
+        best_prompt=best_prompt, best_score=best_score, rounds=len(trace) - 1, trace=trace
+    )

@@ -29,7 +29,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0", "respx>=0.20"]
+dev = ["pytest>=7.0", "respx>=0.20", "ruff>=0.4"]
+
+[project.urls]
+Repository = "https://github.com/ssh071102-code/prompt-forge"
+Issues = "https://github.com/ssh071102-code/prompt-forge/issues"
 
 [project.scripts]
 prompt-forge = "prompt_forge.cli:app"
@@ -39,3 +43,12 @@ include = ["prompt_forge*"]
 
 [tool.setuptools.package-data]
 prompt_forge = ["py.typed"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "UP", "B", "I"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

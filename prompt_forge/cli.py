@@ -71,8 +71,8 @@ def _print_report(result: Result) -> None:
     typer.echo(result.best_prompt)
     typer.echo("\nTrace:")
     typer.echo(f"{'round':>5}  {'score':>6}  failures")
-    for round_trace in result.trace:
-        typer.echo(f"{round_trace.round:>5}  {round_trace.score:>6.2f}  {round_trace.total_failures}")
+    for entry in result.trace:
+        typer.echo(f"{entry.round:>5}  {entry.score:>6.2f}  {entry.total_failures}")
 
 
 @app.command("optimize")

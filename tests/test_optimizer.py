@@ -32,11 +32,15 @@ def test_optimizer_improves_score_across_rounds() -> None:
             return "positive" if "love" in user else "neutral"
         return "unknown"
 
+    improved_prompt = (
+        "PROMPT_V2: Classify sentiment as positive or negative, "
+        "paying close attention to negative tone."
+    )
     fake_llm = FakeLLM(
         task_fn=task_fn,
         proposer_responses=[
             _wrap("PROMPT_V1: Classify sentiment as positive or negative."),
-            _wrap("PROMPT_V2: Classify sentiment as positive or negative, paying close attention to negative tone."),
+            _wrap(improved_prompt),
         ],
     )
 
@@ -52,7 +56,7 @@ def test_optimizer_improves_score_across_rounds() -> None:
 
     assert result.rounds == 2
     assert result.best_score == 1.0
-    assert result.best_prompt == "PROMPT_V2: Classify sentiment as positive or negative, paying close attention to negative tone."
+    assert result.best_prompt == improved_prompt
     # trace has round 0 (initial) plus one entry per round actually run
     assert [t.round for t in result.trace] == [0, 1, 2]
     assert [t.score for t in result.trace] == [0.0, 0.5, 1.0]

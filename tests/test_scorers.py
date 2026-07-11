@@ -25,7 +25,8 @@ def test_exact_match_scorer_partial_credit_on_substring() -> None:
     scorer = ExactMatchScorer()
     example = Example(input="ignored", expected="positive")
 
-    assert scorer.score("I'd call this positive overall.", example) == ExactMatchScorer.PARTIAL_CREDIT
+    score = scorer.score("I'd call this positive overall.", example)
+    assert score == ExactMatchScorer.PARTIAL_CREDIT
 
 
 def test_exact_match_scorer_zero_on_miss() -> None:
