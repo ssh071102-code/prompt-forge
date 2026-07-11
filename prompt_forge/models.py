@@ -30,13 +30,15 @@ class RoundTrace(BaseModel):
     ``round`` 0 always records the evaluation of the initial prompt, before
     any proposer round has run. ``failures`` holds human-readable
     descriptions of the examples that scored below the failure threshold,
-    capped at a small sample so the trace stays readable.
+    capped at ``optimizer.MAX_FAILURE_SAMPLES`` entries so the trace stays
+    readable; ``total_failures`` records how many examples actually failed.
     """
 
     round: int
     prompt: str
     score: float
     failures: list[str] = Field(default_factory=list)
+    total_failures: int = 0
 
 
 class Result(BaseModel):

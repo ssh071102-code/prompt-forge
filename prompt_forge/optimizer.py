@@ -115,6 +115,21 @@ def _parse_proposed_prompt(response: str, fallback: str) -> str:
     return extracted or fallback
 
 
+def _trace_round(round_number: int, prompt: str, evaluation: _Evaluation) -> RoundTrace:
+    """Build a trace entry, capping stored failures at ``MAX_FAILURE_SAMPLES``.
+
+    The full failure list can be as long as the example set; the trace keeps
+    a readable sample plus the true count in ``total_failures``.
+    """
+    return RoundTrace(
+        round=round_number,
+        prompt=prompt,
+        score=evaluation.score,
+        failures=evaluation.failures[:MAX_FAILURE_SAMPLES],
+        total_failures=len(evaluation.failures),
+    )
+
+
 def optimize(
     initial_prompt: str,
     examples: list[Example],
@@ -144,9 +159,7 @@ def optimize(
     evaluation = _evaluate(llm, task_model, initial_prompt, examples, scorer)
     best_prompt = initial_prompt
     best_score = evaluation.score
-    trace = [
-        RoundTrace(round=0, prompt=initial_prompt, score=best_score, failures=evaluation.failures)
-    ]
+    trace = [_trace_round(0, initial_prompt, evaluation)]
 
     stalled_rounds = 0
 
@@ -171,14 +184,7 @@ def optimize(
         candidate_prompt = _parse_proposed_prompt(proposer_response, fallback=best_prompt)
 
         candidate_evaluation = _evaluate(llm, task_model, candidate_prompt, examples, scorer)
-        trace.append(
-            RoundTrace(
-                round=round_number,
-                prompt=candidate_prompt,
-                score=candidate_evaluation.score,
-                failures=candidate_evaluation.failures,
-            )
-        )
+        trace.append(_trace_round(round_number, candidate_prompt, candidate_evaluation))
 
         if candidate_evaluation.score - best_score >= min_gain:
             best_prompt = candidate_prompt

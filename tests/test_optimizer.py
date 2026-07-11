@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 from prompt_forge.models import Example
-from prompt_forge.optimizer import PROMPT_BLOCK_END, PROMPT_BLOCK_START, optimize
+from prompt_forge.optimizer import (
+    MAX_FAILURE_SAMPLES,
+    PROMPT_BLOCK_END,
+    PROMPT_BLOCK_START,
+    optimize,
+)
 from prompt_forge.scorers import ExactMatchScorer
 from tests.fakes import PROPOSER_MODEL, TASK_MODEL, FakeLLM
 
@@ -208,4 +213,28 @@ def test_optimizer_scores_erroring_example_as_zero_without_crashing() -> None:
     # one example scored 1.0, the erroring one scored 0.0 -> average 0.5
     assert result.best_score == 0.5
     assert len(result.trace[0].failures) == 1
+    assert result.trace[0].total_failures == 1
     assert "TRIGGER_ERROR" in result.trace[0].failures[0]
+
+
+def test_optimizer_caps_trace_failures_but_records_true_count() -> None:
+    # With more failing examples than MAX_FAILURE_SAMPLES, the trace stores
+    # only a readable sample while total_failures keeps the real count.
+    examples = [
+        Example(input=f"example number {i}", expected="positive")
+        for i in range(MAX_FAILURE_SAMPLES + 2)
+    ]
+    fake_llm = FakeLLM(task_fn=lambda user: "wrong answer")
+
+    result = optimize(
+        "Classify sentiment.",
+        examples,
+        ExactMatchScorer(),
+        fake_llm,
+        task_model=TASK_MODEL,
+        proposer_model=PROPOSER_MODEL,
+        max_rounds=0,
+    )
+
+    assert len(result.trace[0].failures) == MAX_FAILURE_SAMPLES
+    assert result.trace[0].total_failures == MAX_FAILURE_SAMPLES + 2
