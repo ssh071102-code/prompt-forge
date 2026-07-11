@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from prompt_forge.models import Example
 from prompt_forge.scorers import ExactMatchScorer, LLMJudgeScorer
 from tests.fakes import FakeLLM
@@ -33,33 +35,26 @@ def test_exact_match_scorer_zero_on_miss() -> None:
     assert scorer.score("negative", example) == 0.0
 
 
-def test_llm_judge_scorer_parses_plain_integer() -> None:
-    fake_llm = FakeLLM(task_fn=lambda user: "8")
-    scorer = LLMJudgeScorer(fake_llm, model="fake-task-model")
-    example = Example(input="ignored", expected="a great review")
-
-    assert scorer.score("a pretty great review", example) == 0.8
-
-
-def test_llm_judge_scorer_parses_number_embedded_in_prose() -> None:
-    fake_llm = FakeLLM(task_fn=lambda user: "I'd rate this a 7 out of 10.")
-    scorer = LLMJudgeScorer(fake_llm, model="fake-task-model")
-    example = Example(input="ignored", expected="expected answer")
-
-    assert scorer.score("some output", example) == 0.7
-
-
-def test_llm_judge_scorer_accepts_already_normalized_0_to_1_score() -> None:
-    fake_llm = FakeLLM(task_fn=lambda user: "0.9")
-    scorer = LLMJudgeScorer(fake_llm, model="fake-task-model")
-    example = Example(input="ignored", expected="expected answer")
-
-    assert scorer.score("some output", example) == 0.9
-
-
-def test_llm_judge_scorer_defaults_to_zero_when_unparseable() -> None:
-    fake_llm = FakeLLM(task_fn=lambda user: "I refuse to give a number.")
+@pytest.mark.parametrize(
+    ("judge_text", "expected_score"),
+    [
+        ("8", 0.8),
+        ("1", 0.1),  # bare "1" means 1/10 -- near-total failure, never a perfect score
+        ("10", 1.0),
+        ("7/10", 0.7),
+        ("I'd rate this a 7/10.", 0.7),
+        ("I'd rate this a 7 out of 10.", 0.7),
+        ("0.85", 0.085),  # bare numbers are read on the instructed 0-10 scale
+        ("-3", 0.0),  # clamped to the bottom of the scale
+        ("12", 1.0),  # clamped to the top of the scale
+        ("I refuse to give a number.", 0.0),
+    ],
+)
+def test_llm_judge_scorer_normalizes_rating_to_unit_interval(
+    judge_text: str, expected_score: float
+) -> None:
+    fake_llm = FakeLLM(task_fn=lambda user: judge_text)
     scorer = LLMJudgeScorer(fake_llm, model="fake-task-model")
     example = Example(input="ignored", expected="expected answer")
 
-    assert scorer.score("some output", example) == 0.0
+    assert scorer.score("some output", example) == pytest.approx(expected_score)

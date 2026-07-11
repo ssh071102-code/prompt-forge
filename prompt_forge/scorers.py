@@ -56,11 +56,12 @@ def _normalize(text: str) -> str:
 class LLMJudgeScorer:
     """Asks an LLM to rate how well ``output`` satisfies ``example.expected``.
 
-    The judge is instructed to answer with a single number, but real
-    responses are messy ("I'd rate this a 7/10." or "0.85"), so the rating
-    is extracted with a regex rather than a strict parse. Any value found
-    above 1 is treated as a 0-10 score and rescaled; the result is always
-    clamped to ``[0, 1]``.
+    The judge is instructed to answer with a single number on a 0-10 scale,
+    but real responses are messy ("I'd rate this a 7/10."), so the rating is
+    extracted with a regex rather than a strict parse. Explicit ``X/10``
+    fractions are preferred; otherwise the first bare number is read on the
+    instructed 0-10 scale and divided by 10. The result is always clamped
+    to ``[0, 1]``.
     """
 
     JUDGE_INSTRUCTIONS = (
@@ -86,11 +87,19 @@ class LLMJudgeScorer:
 
 
 def _parse_rating(text: str) -> float:
-    """Extract a numeric rating from free-form judge text, clamped to [0, 1]."""
-    match = re.search(r"-?\d+(?:\.\d+)?", text)
-    if not match:
-        return 0.0
-    value = float(match.group())
-    if value > 1.0:
-        value = value / 10.0
-    return max(0.0, min(1.0, value))
+    """Extract a 0-10 judge rating from free-form text, normalized to [0, 1].
+
+    An explicit ``X/10`` fraction wins over any other number in the text.
+    A bare number is read on the 0-10 scale the judge was instructed to use
+    and divided by 10 -- a bare "1" means 1/10 (near-total failure), never a
+    perfect already-normalized score. The result is clamped to ``[0, 1]``.
+    """
+    fraction = re.search(r"(-?\d+(?:\.\d+)?)\s*/\s*10\b", text)
+    if fraction:
+        value = float(fraction.group(1))
+    else:
+        match = re.search(r"-?\d+(?:\.\d+)?", text)
+        if not match:
+            return 0.0
+        value = float(match.group())
+    return max(0.0, min(1.0, value / 10.0))
