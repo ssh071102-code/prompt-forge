@@ -36,3 +36,6 @@ prompt-forge = "prompt_forge.cli:app"
 
 [tool.setuptools.packages.find]
 include = ["prompt_forge*"]
+
+[tool.setuptools.package-data]
+prompt_forge = ["py.typed"]
