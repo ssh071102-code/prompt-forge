@@ -33,15 +33,19 @@ def _all_output(result) -> str:  # noqa: ANN001 - click's Result type varies acr
 
     Error output goes to stderr on newer click versions (older ones mix it
     into stdout), and typer renders it in a rich panel that wraps long lines
-    with box-drawing characters. Strip the decoration and collapse the
-    whitespace so tests can assert on the plain message text.
+    with box-drawing characters. Rich also force-enables ANSI color on CI
+    terminals (e.g. GitHub Actions), so escape sequences must be stripped
+    whole -- dropping just the ESC byte would leave "[33m" fragments inside
+    the message text. Strip the decoration and collapse the whitespace so
+    tests can assert on the plain message text.
     """
     combined = result.output
     try:
         combined += result.stderr
     except (ValueError, AttributeError):
         pass  # older click mixes stderr into output already
-    flattened = re.sub(r"[^\x20-\x7e]", " ", combined)  # drop rich box-drawing characters
+    no_ansi = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", combined)
+    flattened = re.sub(r"[^\x20-\x7e]", " ", no_ansi)  # drop rich box-drawing characters
     return re.sub(r"\s+", " ", flattened)
 
 
