@@ -6,9 +6,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Annotated
 
 import typer
 import yaml
+from dotenv import load_dotenv
+from pydantic import ValidationError
 
 from prompt_forge.llm import LLM
 from prompt_forge.models import Example, Result
@@ -19,6 +22,12 @@ app = typer.Typer(help="Iteratively optimize a prompt against labeled examples."
 
 DEFAULT_TASK_MODEL = "claude-haiku-4-5"
 DEFAULT_PROPOSER_MODEL = "claude-opus-4-5"
+# The judge grades the task model's outputs, so it must not default to the
+# task model itself -- a weak model grading its own answers inflates scores
+# through self-preference. Default to a stronger model, same as the proposer.
+DEFAULT_JUDGE_MODEL = "claude-opus-4-5"
+
+ENV_FILE = Path("secrets") / ".env"
 
 
 @app.callback()
@@ -27,6 +36,20 @@ def _callback() -> None:
     # Registering a callback keeps `optimize` a required subcommand name
     # (e.g. `prompt-forge optimize examples.yaml --prompt ...`) instead of
     # typer collapsing a single-command app into an implicit default command.
+    #
+    # Load ANTHROPIC_API_KEY (and friends) from secrets/.env if it exists.
+    # A missing file is fine: variables already in the process environment
+    # always take precedence, and the SDK reads them directly.
+    load_dotenv(ENV_FILE)
+
+
+def _make_llm() -> LLM:
+    """Build the Anthropic-backed LLM used by the CLI.
+
+    A module-level seam so tests can monkeypatch it with a FakeLLM and run
+    the whole command end to end without a network call or an API key.
+    """
+    return LLM()
 
 
 def _load_examples(path: Path) -> list[Example]:
@@ -34,7 +57,12 @@ def _load_examples(path: Path) -> list[Example]:
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(data, list):
         raise typer.BadParameter(f"{path} must contain a YAML list of examples.")
-    return [Example(**item) for item in data]
+    try:
+        return [Example(**item) for item in data]
+    except (TypeError, ValidationError) as exc:
+        raise typer.BadParameter(
+            f"{path}: every example needs string 'input' and 'expected' fields.\n{exc}"
+        ) from exc
 
 
 def _print_report(result: Result) -> None:
@@ -49,28 +77,39 @@ def _print_report(result: Result) -> None:
 
 @app.command("optimize")
 def optimize_command(
-    examples_path: Path = typer.Argument(
-        ..., exists=True, readable=True, help="YAML file of {input, expected} examples."
-    ),
-    prompt: str = typer.Option(..., "--prompt", help="The initial prompt to optimize."),
-    task_model: str = typer.Option(
-        DEFAULT_TASK_MODEL, "--task-model", help="Model used to run the prompt on each example."
-    ),
-    proposer_model: str = typer.Option(
-        DEFAULT_PROPOSER_MODEL, "--proposer-model", help="Model used to propose improved prompts."
-    ),
-    max_rounds: int = typer.Option(5, "--max-rounds", help="Maximum optimization rounds."),
-    min_gain: float = typer.Option(
-        0.01, "--min-gain", help="Minimum score improvement required to keep a candidate."
-    ),
-    judge: bool = typer.Option(
-        False, "--judge", help="Score outputs with an LLM judge instead of exact match."
-    ),
+    examples_path: Annotated[
+        Path,
+        typer.Argument(exists=True, readable=True, help="YAML file of {input, expected} examples."),
+    ],
+    prompt: Annotated[str, typer.Option("--prompt", help="The initial prompt to optimize.")],
+    task_model: Annotated[
+        str,
+        typer.Option("--task-model", help="Model used to run the prompt on each example."),
+    ] = DEFAULT_TASK_MODEL,
+    proposer_model: Annotated[
+        str,
+        typer.Option("--proposer-model", help="Model used to propose improved prompts."),
+    ] = DEFAULT_PROPOSER_MODEL,
+    judge_model: Annotated[
+        str,
+        typer.Option("--judge-model", help="Model used by the LLM judge (only with --judge)."),
+    ] = DEFAULT_JUDGE_MODEL,
+    max_rounds: Annotated[
+        int, typer.Option("--max-rounds", help="Maximum optimization rounds.")
+    ] = 5,
+    min_gain: Annotated[
+        float,
+        typer.Option("--min-gain", help="Minimum score improvement required to keep a candidate."),
+    ] = 0.01,
+    judge: Annotated[
+        bool,
+        typer.Option("--judge", help="Score outputs with an LLM judge instead of exact match."),
+    ] = False,
 ) -> None:
     """Optimize --prompt against the labeled examples in EXAMPLES_PATH."""
     examples = _load_examples(examples_path)
-    llm = LLM()
-    scorer = LLMJudgeScorer(llm, model=task_model) if judge else ExactMatchScorer()
+    llm = _make_llm()
+    scorer = LLMJudgeScorer(llm, model=judge_model) if judge else ExactMatchScorer()
 
     result = optimize(
         prompt,
