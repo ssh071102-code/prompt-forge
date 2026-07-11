@@ -156,7 +156,18 @@ def optimize(
             break
 
         proposer_prompt = _build_proposer_prompt(best_prompt, evaluation.failures)
-        proposer_response = llm.complete(model=proposer_model, system="", user=proposer_prompt)
+        try:
+            proposer_response = llm.complete(model=proposer_model, system="", user=proposer_prompt)
+        except Exception as exc:  # noqa: BLE001 - a flaky proposer must not kill the run
+            # Mirror the per-example isolation in _evaluate: one transient
+            # proposer error costs a round, not the whole run. The round
+            # counts as stalled and the best-so-far result is preserved.
+            logger.warning("Proposer call failed in round %d: %s", round_number, exc)
+            stalled_rounds += 1
+            if stalled_rounds >= STALL_LIMIT:
+                logger.info("No improvement for %d consecutive rounds; stopping.", stalled_rounds)
+                break
+            continue
         candidate_prompt = _parse_proposed_prompt(proposer_response, fallback=best_prompt)
 
         candidate_evaluation = _evaluate(llm, task_model, candidate_prompt, examples, scorer)

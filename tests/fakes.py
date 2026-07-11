@@ -22,7 +22,9 @@ class FakeLLM:
       off substrings of either.
     - ``proposer_responses`` is a fixed list of responses returned in order,
       one per call to the proposer model -- this is what lets a test script
-      "round 2's proposed prompt scores higher than round 1's".
+      "round 2's proposed prompt scores higher than round 1's". An entry
+      that is an ``Exception`` instance is raised instead of returned, which
+      lets tests simulate a transient proposer API error on that call.
 
     Every call is recorded in ``calls`` for tests that want to assert on
     call counts or exact arguments.
@@ -31,7 +33,7 @@ class FakeLLM:
     def __init__(
         self,
         task_fn: Callable[[str], str],
-        proposer_responses: list[str] | None = None,
+        proposer_responses: list[str | Exception] | None = None,
     ) -> None:
         self.task_fn = task_fn
         self.proposer_responses = list(proposer_responses or [])
@@ -45,5 +47,7 @@ class FakeLLM:
                 raise AssertionError("FakeLLM proposer called more times than scripted.")
             response = self.proposer_responses[self._proposer_call_count]
             self._proposer_call_count += 1
+            if isinstance(response, Exception):
+                raise response
             return response
         return self.task_fn(user)
