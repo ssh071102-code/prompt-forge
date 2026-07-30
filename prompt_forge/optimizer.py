@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from prompt_forge.llm import LLMProtocol
+from prompt_forge.llm import FatalLLMError, LLMProtocol
 from prompt_forge.models import Example, Result, RoundTrace
 from prompt_forge.scorers import Scorer
 
@@ -20,6 +20,13 @@ logger = logging.getLogger(__name__)
 
 # An example scoring below this is considered a failure worth showing to the proposer.
 FAILURE_THRESHOLD = 0.5
+
+# An average score at or above this means there is nothing meaningful left to
+# learn from -- the search stops. Below it, even a run with zero sub-threshold
+# failures keeps optimizing, learning from its weakest examples instead
+# (an LLM judge that scores 6-8/10 everywhere never produces a "failure",
+# but a 0.7 average is nowhere near done).
+PERFECT_SCORE = 0.99
 
 # How many failures to show the proposer per round -- enough to find a pattern
 # without blowing the prompt budget or overfitting to one bad example.
@@ -38,6 +45,12 @@ PROMPT_BLOCK_END = "<<<END_PROMPT>>>"
 class _Evaluation:
     score: float
     failures: list[str]
+    weakest: list[str]
+
+    @property
+    def learn_samples(self) -> list[str]:
+        """What to show the proposer: failures, else the weakest examples."""
+        return self.failures if self.failures else self.weakest
 
 
 def _run_example(llm: LLMProtocol, task_model: str, prompt: str, example: Example) -> str:
@@ -55,28 +68,36 @@ def _evaluate(
 ) -> _Evaluation:
     """Run ``prompt`` over every example and score each output.
 
-    An example that raises during generation or scoring is scored 0.0 and
-    recorded as a failure rather than crashing the run -- a single flaky
-    example (a timeout, a malformed response) should never take down an
-    entire optimization pass.
+    An example that raises a *transient* error during generation or scoring is
+    scored 0.0 and recorded as a failure rather than crashing the run -- a
+    single flaky example (a timeout, a malformed response) should never take
+    down an entire optimization pass. A ``FatalLLMError`` (bad API key,
+    unknown model) is deterministic and re-raised immediately: scoring it 0.0
+    would silently turn every run into an all-zero "success".
     """
     scores: list[float] = []
     failures: list[str] = []
+    scored_lines: list[tuple[float, str]] = []
     for example in examples:
         try:
             output = _run_example(llm, task_model, prompt, example)
             example_score = scorer.score(output, example)
+        except FatalLLMError:
+            raise
         except Exception as exc:  # noqa: BLE001 - isolate per-example failures
             logger.warning("Example errored during evaluation, scoring 0.0: %s", exc)
             output = f"<error: {exc}>"
             example_score = 0.0
         scores.append(example_score)
+        line = f"input: {example.input!r} | expected: {example.expected!r} | got: {output!r}"
         if example_score < FAILURE_THRESHOLD:
-            failures.append(
-                f"input: {example.input!r} | expected: {example.expected!r} | got: {output!r}"
-            )
+            failures.append(line)
+        elif example_score < PERFECT_SCORE:
+            scored_lines.append((example_score, f"{line} (scored {example_score:.2f})"))
+    scored_lines.sort(key=lambda pair: pair[0])
+    weakest = [line for _, line in scored_lines[:MAX_FAILURE_SAMPLES]]
     average = sum(scores) / len(scores) if scores else 0.0
-    return _Evaluation(score=average, failures=failures)
+    return _Evaluation(score=average, failures=failures, weakest=weakest)
 
 
 def _build_proposer_prompt(current_prompt: str, failures: list[str]) -> str:
@@ -153,8 +174,16 @@ def optimize(
        ``min_gain``; otherwise counts a stalled round.
 
     The search stops after ``max_rounds`` rounds, after ``STALL_LIMIT``
-    consecutive rounds without improvement, or as soon as the best prompt
-    has no more failures to learn from -- whichever comes first.
+    consecutive rounds without improvement, or as soon as the average score
+    reaches ``PERFECT_SCORE`` -- whichever comes first. A run with no
+    sub-threshold failures but a mediocre average keeps going, showing the
+    proposer its weakest examples instead.
+
+    Rounds that produce no candidate to evaluate -- a failed proposer call, or
+    a malformed response with no prompt delimiters -- are recorded in the
+    trace as stalled rounds (prompt and score unchanged) rather than silently
+    skipped, so trace round numbers stay contiguous and ``Result.rounds``
+    counts every round attempted.
     """
     evaluation = _evaluate(llm, task_model, initial_prompt, examples, scorer)
     best_prompt = initial_prompt
@@ -163,25 +192,48 @@ def optimize(
 
     stalled_rounds = 0
 
+    def _stall(round_number: int) -> bool:
+        """Record a stalled round in the trace; True means stop the search."""
+        nonlocal stalled_rounds
+        trace.append(_trace_round(round_number, best_prompt, evaluation))
+        stalled_rounds += 1
+        if stalled_rounds >= STALL_LIMIT:
+            logger.info("No improvement for %d consecutive rounds; stopping.", stalled_rounds)
+            return True
+        return False
+
     for round_number in range(1, max_rounds + 1):
-        if not evaluation.failures:
-            logger.info("No failures left to learn from; stopping early.")
+        samples = evaluation.learn_samples
+        if not samples:
+            logger.info("Score %.2f leaves nothing to learn from; stopping early.", best_score)
             break
 
-        proposer_prompt = _build_proposer_prompt(best_prompt, evaluation.failures)
+        proposer_prompt = _build_proposer_prompt(best_prompt, samples)
         try:
             proposer_response = llm.complete(model=proposer_model, system="", user=proposer_prompt)
+        except FatalLLMError:
+            raise
         except Exception as exc:  # noqa: BLE001 - a flaky proposer must not kill the run
             # Mirror the per-example isolation in _evaluate: one transient
-            # proposer error costs a round, not the whole run. The round
-            # counts as stalled and the best-so-far result is preserved.
+            # proposer error costs a round, not the whole run.
             logger.warning("Proposer call failed in round %d: %s", round_number, exc)
-            stalled_rounds += 1
-            if stalled_rounds >= STALL_LIMIT:
-                logger.info("No improvement for %d consecutive rounds; stopping.", stalled_rounds)
+            if _stall(round_number):
                 break
             continue
         candidate_prompt = _parse_proposed_prompt(proposer_response, fallback=best_prompt)
+
+        if candidate_prompt == best_prompt:
+            # A no-op proposal (missing delimiters, or the proposer returned
+            # the prompt unchanged). Re-evaluating it would spend one task
+            # call per example re-measuring a known score -- and, since
+            # sampling is stochastic, could "beat" best_score on noise alone
+            # and accept the unchanged prompt as an improvement.
+            logger.warning(
+                "Round %d produced no new prompt; counting a stalled round.", round_number
+            )
+            if _stall(round_number):
+                break
+            continue
 
         candidate_evaluation = _evaluate(llm, task_model, candidate_prompt, examples, scorer)
         trace.append(_trace_round(round_number, candidate_prompt, candidate_evaluation))

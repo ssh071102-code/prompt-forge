@@ -242,3 +242,143 @@ def test_optimizer_caps_trace_failures_but_records_true_count() -> None:
 
     assert len(result.trace[0].failures) == MAX_FAILURE_SAMPLES
     assert result.trace[0].total_failures == MAX_FAILURE_SAMPLES + 2
+
+
+def test_noop_proposal_stalls_without_reevaluation() -> None:
+    # Malformed proposer responses (no delimiters) fall back to the current
+    # best prompt. Re-evaluating that prompt would spend one task call per
+    # example re-measuring a known score -- and could accept the unchanged
+    # prompt on sampling noise -- so the round must count as a stall with no
+    # evaluation at all.
+    fake_llm = FakeLLM(
+        task_fn=lambda user: "wrong answer",
+        proposer_responses=["no delimiters here", "still no delimiters"],
+    )
+
+    result = optimize(
+        "PROMPT_V0: Classify sentiment.",
+        EXAMPLES,
+        ExactMatchScorer(),
+        fake_llm,
+        task_model=TASK_MODEL,
+        proposer_model=PROPOSER_MODEL,
+        max_rounds=5,
+    )
+
+    # Only round 0 evaluated: one task call per example, nothing more.
+    task_calls = [c for c in fake_llm.calls if c[0] == TASK_MODEL]
+    assert len(task_calls) == len(EXAMPLES)
+    # Both stalled rounds are recorded in the trace with the prompt unchanged.
+    assert result.rounds == 2
+    assert [t.round for t in result.trace] == [0, 1, 2]
+    assert result.trace[1].prompt == result.trace[0].prompt
+    assert result.trace[1].score == result.trace[0].score
+
+
+def test_uniform_midrange_scores_keep_optimizing() -> None:
+    # A scorer that never drops below the failure threshold used to end the
+    # run at round 0 ("no failures to learn from") even at a mediocre 0.7
+    # average. The optimizer must keep going, showing the proposer its
+    # weakest examples instead.
+    class MidrangeScorer:
+        def score(self, output: str, example: Example) -> float:
+            return 1.0 if output == "great answer" else 0.7
+
+    def task_fn(user: str) -> str:
+        return "great answer" if "PROMPT_V1" in user else "mediocre answer"
+
+    fake_llm = FakeLLM(
+        task_fn=task_fn,
+        proposer_responses=[_wrap("PROMPT_V1: be better.")],
+    )
+
+    result = optimize(
+        "PROMPT_V0: Classify sentiment.",
+        EXAMPLES,
+        MidrangeScorer(),
+        fake_llm,
+        task_model=TASK_MODEL,
+        proposer_model=PROPOSER_MODEL,
+        max_rounds=5,
+    )
+
+    assert result.best_score == 1.0
+    assert result.rounds == 1
+    # The proposer saw the weakest examples annotated with their scores.
+    proposer_calls = [c for c in fake_llm.calls if c[0] == PROPOSER_MODEL]
+    assert len(proposer_calls) == 1
+    assert "(scored 0.70)" in proposer_calls[0][2]
+
+
+def test_fatal_llm_error_aborts_the_run() -> None:
+    # A deterministic API failure (bad key, unknown model) fails every call;
+    # scoring it 0.0 per example would report an all-zero "success".
+    import pytest
+
+    from prompt_forge.llm import FatalLLMError
+
+    fake_llm = FakeLLM(task_fn=lambda user: (_ for _ in ()).throw(FatalLLMError("bad key")))
+
+    with pytest.raises(FatalLLMError):
+        optimize(
+            "PROMPT_V0: Classify sentiment.",
+            EXAMPLES,
+            ExactMatchScorer(),
+            fake_llm,
+            task_model=TASK_MODEL,
+            proposer_model=PROPOSER_MODEL,
+        )
+
+
+def test_fatal_proposer_error_aborts_the_run() -> None:
+    import pytest
+
+    from prompt_forge.llm import FatalLLMError
+
+    fake_llm = FakeLLM(
+        task_fn=lambda user: "wrong answer",
+        proposer_responses=[FatalLLMError("model not found")],
+    )
+
+    with pytest.raises(FatalLLMError):
+        optimize(
+            "PROMPT_V0: Classify sentiment.",
+            EXAMPLES,
+            ExactMatchScorer(),
+            fake_llm,
+            task_model=TASK_MODEL,
+            proposer_model=PROPOSER_MODEL,
+        )
+
+
+def test_proposer_error_round_is_recorded_in_trace() -> None:
+    # A transient proposer failure costs a round; the trace must record it
+    # (prompt and score unchanged) so round numbers stay contiguous and
+    # Result.rounds counts every round attempted.
+    def task_fn(user: str) -> str:
+        if "PROMPT_V1" in user:
+            return "positive" if "love" in user else "negative"
+        return "unknown"
+
+    fake_llm = FakeLLM(
+        task_fn=task_fn,
+        proposer_responses=[RuntimeError("transient boom"), _wrap("PROMPT_V1: improved.")],
+    )
+
+    result = optimize(
+        "PROMPT_V0: Classify sentiment.",
+        EXAMPLES,
+        ExactMatchScorer(),
+        fake_llm,
+        task_model=TASK_MODEL,
+        proposer_model=PROPOSER_MODEL,
+        max_rounds=5,
+    )
+
+    assert result.best_score == 1.0
+    assert result.rounds == 2
+    assert [t.round for t in result.trace] == [0, 1, 2]
+    # Round 1 is the stalled round: unchanged prompt, unchanged score.
+    assert result.trace[1].prompt == result.trace[0].prompt
+    assert result.trace[1].score == result.trace[0].score
+    assert result.trace[2].score == 1.0
