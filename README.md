@@ -123,8 +123,8 @@ round   score  failures
 | Flag | Default | Meaning |
 |---|---|---|
 | `--task-model` | `claude-haiku-4-5` | Model that runs the prompt on each example. |
-| `--proposer-model` | `claude-opus-4-5` | Model that writes improved prompt candidates. |
-| `--judge-model` | `claude-opus-4-5` | Model used by the LLM judge (only with `--judge`). Defaults to a stronger model than the task model, so the weakest model never grades its own output. |
+| `--proposer-model` | `claude-opus-5` | Model that writes improved prompt candidates. |
+| `--judge-model` | `claude-opus-5` | Model used by the LLM judge (only with `--judge`). Defaults to a stronger model than the task model, so the weakest model never grades its own output. |
 | `--max-rounds` | `5` | Maximum optimization rounds. |
 | `--min-gain` | `0.01` | Minimum score improvement required to keep a candidate. |
 | `--judge` | off | Score outputs with an LLM judge instead of exact match. |
@@ -150,7 +150,7 @@ examples = [
 result = optimize(
     "Tag the support ticket with one topic label.",
     examples, KeywordScorer(), LLM(),  # LLM() reads ANTHROPIC_API_KEY from the env
-    task_model="claude-haiku-4-5", proposer_model="claude-opus-4-5",
+    task_model="claude-haiku-4-5", proposer_model="claude-opus-5",
 )
 print(f"{result.best_score:.2f}", result.best_prompt)
 ```

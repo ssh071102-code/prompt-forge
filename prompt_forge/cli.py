@@ -21,11 +21,11 @@ from prompt_forge.scorers import ExactMatchScorer, LLMJudgeScorer
 app = typer.Typer(help="Iteratively optimize a prompt against labeled examples.")
 
 DEFAULT_TASK_MODEL = "claude-haiku-4-5"
-DEFAULT_PROPOSER_MODEL = "claude-opus-4-5"
+DEFAULT_PROPOSER_MODEL = "claude-opus-5"
 # The judge grades the task model's outputs, so it must not default to the
 # task model itself -- a weak model grading its own answers inflates scores
 # through self-preference. Default to a stronger model, same as the proposer.
-DEFAULT_JUDGE_MODEL = "claude-opus-4-5"
+DEFAULT_JUDGE_MODEL = "claude-opus-5"
 
 ENV_FILE = Path("secrets") / ".env"
 
