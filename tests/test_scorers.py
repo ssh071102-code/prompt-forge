@@ -59,3 +59,39 @@ def test_llm_judge_scorer_normalizes_rating_to_unit_interval(
     example = Example(input="ignored", expected="expected answer")
 
     assert scorer.score("some output", example) == pytest.approx(expected_score)
+
+
+def test_exact_match_scorer_no_credit_for_embedded_word() -> None:
+    scorer = ExactMatchScorer()
+
+    assert scorer.score("concatenate", Example(input="i", expected="cat")) == 0.0
+    assert scorer.score("yesterday it rained", Example(input="i", expected="yes")) == 0.0
+
+
+def test_exact_match_scorer_no_credit_for_negated_answer() -> None:
+    scorer = ExactMatchScorer()
+    example = Example(input="ignored", expected="positive")
+
+    assert scorer.score("not positive", example) == 0.0
+    assert scorer.score("This is definitely not positive.", example) == 0.0
+    # A plain wrapped answer still earns partial credit.
+    assert scorer.score("The tone is positive.", example) == ExactMatchScorer.PARTIAL_CREDIT
+
+
+@pytest.mark.parametrize(
+    ("judge_text", "expected_score"),
+    [
+        # The scale preamble's numbers must not be mistaken for the verdict.
+        ("On a scale of 0 to 10, I'd say 7", 0.7),
+        ("Between 0 and 10 this deserves a 9", 0.9),
+        ("I would rate it 7 out of 10", 0.7),
+        # An explicit fraction still wins outright.
+        ("On a scale of 0 to 10: 6/10", 0.6),
+    ],
+)
+def test_judge_scorer_ignores_scale_preamble(judge_text: str, expected_score: float) -> None:
+    llm = FakeLLM(task_fn=lambda user: judge_text)
+    scorer = LLMJudgeScorer(llm, model="fake-task-model")
+
+    score = scorer.score("some output", Example(input="i", expected="e"))
+    assert score == pytest.approx(expected_score)
