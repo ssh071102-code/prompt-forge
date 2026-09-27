@@ -22,14 +22,14 @@ classifiers = [
 ]
 dependencies = [
     "pydantic>=2.0",
-    "anthropic>=0.30",
+    "anthropic>=0.30,<2",
     "typer>=0.12",
     "pyyaml>=6.0",
     "python-dotenv>=1.0",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0", "respx>=0.20", "ruff>=0.4"]
+dev = ["pytest>=7.0", "ruff>=0.4", "mypy>=1.10", "types-PyYAML"]
 
 [project.urls]
 Repository = "https://github.com/ssh071102-code/prompt-forge"
@@ -52,3 +52,7 @@ select = ["E", "F", "W", "UP", "B", "I"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.mypy]
+strict = true
+files = ["prompt_forge", "tests", "examples"]
