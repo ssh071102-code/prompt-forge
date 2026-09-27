@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import pytest
+
 from prompt_forge.models import Example
 from prompt_forge.optimizer import (
     MAX_FAILURE_SAMPLES,
     PROMPT_BLOCK_END,
     PROMPT_BLOCK_START,
+    EvaluationFailedError,
     optimize,
+    split_examples,
 )
 from prompt_forge.scorers import ExactMatchScorer
 from tests.fakes import PROPOSER_MODEL, TASK_MODEL, FakeLLM
@@ -382,3 +386,99 @@ def test_proposer_error_round_is_recorded_in_trace() -> None:
     assert result.trace[1].prompt == result.trace[0].prompt
     assert result.trace[1].score == result.trace[0].score
     assert result.trace[2].score == 1.0
+
+
+def test_every_example_erroring_on_the_initial_prompt_aborts() -> None:
+    # A misconfiguration that is not recognised as fatal (for example a
+    # custom provider raising a plain exception for a missing key) makes
+    # every example fail. That must stop the run, not report 0.00.
+    def task_fn(user: str) -> str:
+        raise RuntimeError("no credentials")
+
+    with pytest.raises(EvaluationFailedError, match="all 2 examples errored"):
+        optimize(
+            "PROMPT_V0",
+            EXAMPLES,
+            ExactMatchScorer(),
+            FakeLLM(task_fn=task_fn),
+            task_model=TASK_MODEL,
+            proposer_model=PROPOSER_MODEL,
+        )
+
+
+def test_split_examples_is_deterministic_and_disjoint() -> None:
+    examples = [Example(input=f"in {i}", expected=str(i)) for i in range(10)]
+
+    train, val = split_examples(examples, 0.3, seed=7)
+    train_again, val_again = split_examples(examples, 0.3, seed=7)
+
+    assert (train, val) == (train_again, val_again)
+    assert len(train) == 7 and len(val) == 3
+    assert {e.input for e in train}.isdisjoint({e.input for e in val})
+    assert sorted(e.input for e in train + val) == sorted(e.input for e in examples)
+
+
+def test_split_examples_keeps_at_least_one_on_each_side() -> None:
+    examples = [Example(input=f"in {i}", expected=str(i)) for i in range(3)]
+
+    train, val = split_examples(examples, 0.05)
+    assert (len(train), len(val)) == (2, 1)
+    train, val = split_examples(examples, 0.9)
+    assert (len(train), len(val)) == (1, 2)
+
+
+def test_split_examples_zero_fraction_returns_everything_as_train() -> None:
+    assert split_examples(EXAMPLES, 0.0) == (EXAMPLES, [])
+
+
+@pytest.mark.parametrize("fraction", [-0.1, 1.0])
+def test_split_examples_rejects_out_of_range_fraction(fraction: float) -> None:
+    with pytest.raises(ValueError):
+        split_examples(EXAMPLES, fraction)
+
+
+def test_validation_set_is_scored_but_never_shown_to_the_proposer() -> None:
+    # The candidate is chosen on the training example only. The validation
+    # example is scored for the initial and the final prompt after the
+    # search, and never appears in a proposer request.
+    def task_fn(user: str) -> str:
+        if "PROMPT_V1" in user:
+            return "positive" if "love" in user else "negative"
+        return "unknown"
+
+    train = [Example(input="I love this movie", expected="positive")]
+    validation = [Example(input="VALIDATION_ONLY terrible film", expected="negative")]
+    fake_llm = FakeLLM(task_fn=task_fn, proposer_responses=[_wrap("PROMPT_V1: better.")])
+
+    result = optimize(
+        "PROMPT_V0",
+        train,
+        ExactMatchScorer(),
+        fake_llm,
+        task_model=TASK_MODEL,
+        proposer_model=PROPOSER_MODEL,
+        validation=validation,
+    )
+
+    assert result.best_score == 1.0
+    assert result.initial_val_score == 0.0
+    assert result.val_score == 1.0
+    proposer_text = " ".join(c[2] for c in fake_llm.calls if c[0] == PROPOSER_MODEL)
+    assert "VALIDATION_ONLY" not in proposer_text
+    # Round 0 and round 1 on train, then initial and best prompt on validation.
+    assert len([c for c in fake_llm.calls if c[0] == TASK_MODEL]) == 4
+
+
+def test_no_validation_leaves_val_scores_empty() -> None:
+    result = optimize(
+        "PROMPT_V0",
+        EXAMPLES,
+        ExactMatchScorer(),
+        FakeLLM(task_fn=lambda user: "positive"),
+        task_model=TASK_MODEL,
+        proposer_model=PROPOSER_MODEL,
+        max_rounds=0,
+    )
+
+    assert result.val_score is None
+    assert result.initial_val_score is None

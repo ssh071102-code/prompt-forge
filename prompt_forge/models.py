@@ -42,9 +42,18 @@ class RoundTrace(BaseModel):
 
 
 class Result(BaseModel):
-    """The final output of an optimization run."""
+    """The final output of an optimization run.
+
+    ``best_score`` is measured on the training examples the search optimized
+    against, so it is optimistically biased. ``val_score`` and
+    ``initial_val_score`` are the best and the initial prompt scored on the
+    validation examples, which the search never saw. Both are ``None`` when
+    no validation set was given.
+    """
 
     best_prompt: str
     best_score: float
     rounds: int
     trace: list[RoundTrace] = Field(default_factory=list)
+    initial_val_score: float | None = None
+    val_score: float | None = None

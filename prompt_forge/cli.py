@@ -13,9 +13,9 @@ import yaml
 from dotenv import load_dotenv
 from pydantic import ValidationError
 
-from prompt_forge.llm import LLM
+from prompt_forge.llm import LLM, FatalLLMError
 from prompt_forge.models import Example, Result
-from prompt_forge.optimizer import optimize
+from prompt_forge.optimizer import EvaluationFailedError, optimize, split_examples
 from prompt_forge.scorers import ExactMatchScorer, LLMJudgeScorer
 
 app = typer.Typer(help="Iteratively optimize a prompt against labeled examples.")
@@ -65,12 +65,22 @@ def _load_examples(path: Path) -> list[Example]:
         ) from exc
 
 
-def _print_report(result: Result) -> None:
-    typer.echo(f"\nBest score: {result.best_score:.2f} (after {result.rounds} round(s))\n")
+def _print_report(result: Result, n_train: int, n_val: int) -> None:
+    typer.echo(
+        f"\nTrain score: {result.best_score:.2f} on {n_train} example(s) "
+        f"(after {result.rounds} round(s))"
+    )
+    if result.val_score is not None and result.initial_val_score is not None:
+        typer.echo(
+            f"Validation score: {result.val_score:.2f} on {n_val} held-out example(s) "
+            f"(initial prompt: {result.initial_val_score:.2f})\n"
+        )
+    else:
+        typer.echo("Validation score: n/a (no validation set; the train score is optimistic)\n")
     typer.echo("Best prompt:")
     typer.echo(result.best_prompt)
     typer.echo("\nTrace:")
-    typer.echo(f"{'round':>5}  {'score':>6}  failures")
+    typer.echo(f"{'round':>5}  {'train':>6}  failures")
     for entry in result.trace:
         typer.echo(f"{entry.round:>5}  {entry.score:>6.2f}  {entry.total_failures}")
 
@@ -105,24 +115,59 @@ def optimize_command(
         bool,
         typer.Option("--judge", help="Score outputs with an LLM judge instead of exact match."),
     ] = False,
+    val_split: Annotated[
+        float,
+        typer.Option(
+            "--val-split",
+            min=0.0,
+            max=0.95,
+            help="Fraction of EXAMPLES_PATH held out for validation (0 disables). "
+            "Ignored when --val is given.",
+        ),
+    ] = 0.3,
+    val_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--val",
+            exists=True,
+            readable=True,
+            help="Separate YAML file of validation examples. All of EXAMPLES_PATH is then "
+            "used for training.",
+        ),
+    ] = None,
+    seed: Annotated[
+        int, typer.Option("--seed", help="Random seed for the train/validation shuffle.")
+    ] = 0,
 ) -> None:
     """Optimize --prompt against the labeled examples in EXAMPLES_PATH."""
     examples = _load_examples(examples_path)
+    if val_path is not None:
+        train, validation = examples, _load_examples(val_path)
+    else:
+        try:
+            train, validation = split_examples(examples, val_split, seed=seed)
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc), param_hint="--val-split") from exc
     llm = _make_llm()
     scorer = LLMJudgeScorer(llm, model=judge_model) if judge else ExactMatchScorer()
 
-    result = optimize(
-        prompt,
-        examples,
-        scorer,
-        llm,
-        task_model=task_model,
-        proposer_model=proposer_model,
-        max_rounds=max_rounds,
-        min_gain=min_gain,
-    )
+    try:
+        result = optimize(
+            prompt,
+            train,
+            scorer,
+            llm,
+            task_model=task_model,
+            proposer_model=proposer_model,
+            max_rounds=max_rounds,
+            min_gain=min_gain,
+            validation=validation,
+        )
+    except (FatalLLMError, EvaluationFailedError) as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
 
-    _print_report(result)
+    _print_report(result, n_train=len(train), n_val=len(validation))
 
 
 if __name__ == "__main__":

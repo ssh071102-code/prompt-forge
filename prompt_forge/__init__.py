@@ -11,9 +11,9 @@ hill-climbs an initial prompt toward higher quality by repeatedly:
 See ``prompt_forge.optimizer.optimize`` for the entry point.
 """
 
-from prompt_forge.llm import LLM, LLMProtocol
+from prompt_forge.llm import LLM, FatalLLMError, LLMProtocol
 from prompt_forge.models import Candidate, Example, Result, RoundTrace
-from prompt_forge.optimizer import optimize
+from prompt_forge.optimizer import EvaluationFailedError, optimize, split_examples
 from prompt_forge.scorers import ExactMatchScorer, LLMJudgeScorer, Scorer
 
 __version__ = "0.1.0"
@@ -21,6 +21,8 @@ __version__ = "0.1.0"
 __all__ = [
     "LLM",
     "LLMProtocol",
+    "EvaluationFailedError",
+    "FatalLLMError",
     "Candidate",
     "Example",
     "ExactMatchScorer",
@@ -29,5 +31,6 @@ __all__ = [
     "RoundTrace",
     "Scorer",
     "optimize",
+    "split_examples",
     "__version__",
 ]

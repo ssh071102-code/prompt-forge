@@ -1,15 +1,21 @@
 """The hill-climbing optimization loop.
 
-``optimize`` runs the current best prompt over a set of labeled examples,
-scores the outputs, and hands the failures to an LLM "proposer" that tries
-to write a better prompt. The candidate is kept only if it scores
+``optimize`` runs the current best prompt over a set of labeled training
+examples, scores the outputs, and hands the failures to an LLM "proposer"
+that tries to write a better prompt. The candidate is kept only if it scores
 meaningfully higher than the current best; the search stops once it runs
 out of rounds or stalls for two rounds in a row.
+
+Every decision in the search is made on the training examples, so the
+training score of the winning prompt is optimistically biased. Pass a
+separate ``validation`` set (``split_examples`` makes one) to get a score
+the search never saw.
 """
 
 from __future__ import annotations
 
 import logging
+import random
 from dataclasses import dataclass
 
 from prompt_forge.llm import FatalLLMError, LLMProtocol
@@ -41,11 +47,43 @@ PROMPT_BLOCK_START = "<<<PROMPT>>>"
 PROMPT_BLOCK_END = "<<<END_PROMPT>>>"
 
 
+class EvaluationFailedError(RuntimeError):
+    """Every example errored while evaluating the initial prompt.
+
+    Scoring those as 0.0 would start the search from a meaningless baseline.
+    When nothing at all succeeds the cause is almost always configuration
+    (credentials, model name, a broken scorer), so the run stops instead.
+    """
+
+
+def split_examples(
+    examples: list[Example], val_fraction: float, *, seed: int = 0
+) -> tuple[list[Example], list[Example]]:
+    """Shuffle ``examples`` deterministically and split off a validation set.
+
+    Returns ``(train, validation)``. The validation set gets
+    ``round(len(examples) * val_fraction)`` examples, but at least one; the
+    training set always keeps at least one. ``val_fraction == 0`` returns
+    every example as training data and an empty validation set.
+    """
+    if not 0.0 <= val_fraction < 1.0:
+        raise ValueError(f"val_fraction must be in [0, 1), got {val_fraction}")
+    if val_fraction == 0.0:
+        return list(examples), []
+    if len(examples) < 2:
+        raise ValueError("need at least 2 examples to split off a validation set")
+    shuffled = list(examples)
+    random.Random(seed).shuffle(shuffled)
+    n_val = min(max(1, round(len(shuffled) * val_fraction)), len(shuffled) - 1)
+    return shuffled[n_val:], shuffled[:n_val]
+
+
 @dataclass
 class _Evaluation:
     score: float
     failures: list[str]
     weakest: list[str]
+    errors: int = 0
 
     @property
     def learn_samples(self) -> list[str]:
@@ -78,6 +116,7 @@ def _evaluate(
     scores: list[float] = []
     failures: list[str] = []
     scored_lines: list[tuple[float, str]] = []
+    errors = 0
     for example in examples:
         try:
             output = _run_example(llm, task_model, prompt, example)
@@ -88,6 +127,7 @@ def _evaluate(
             logger.warning("Example errored during evaluation, scoring 0.0: %s", exc)
             output = f"<error: {exc}>"
             example_score = 0.0
+            errors += 1
         scores.append(example_score)
         line = f"input: {example.input!r} | expected: {example.expected!r} | got: {output!r}"
         if example_score < FAILURE_THRESHOLD:
@@ -97,7 +137,7 @@ def _evaluate(
     scored_lines.sort(key=lambda pair: pair[0])
     weakest = [line for _, line in scored_lines[:MAX_FAILURE_SAMPLES]]
     average = sum(scores) / len(scores) if scores else 0.0
-    return _Evaluation(score=average, failures=failures, weakest=weakest)
+    return _Evaluation(score=average, failures=failures, weakest=weakest, errors=errors)
 
 
 def _build_proposer_prompt(current_prompt: str, failures: list[str]) -> str:
@@ -109,7 +149,7 @@ def _build_proposer_prompt(current_prompt: str, failures: list[str]) -> str:
         "perform a task.\n\n"
         "Current prompt:\n"
         f"{current_prompt}\n\n"
-        "The current prompt produced these failures on held-out examples:\n"
+        "The current prompt produced these failures on training examples:\n"
         f"{failure_block}\n\n"
         "Write an improved version of the prompt that addresses these "
         "failures while remaining general -- it must not hardcode answers "
@@ -161,6 +201,7 @@ def optimize(
     proposer_model: str,
     max_rounds: int = 5,
     min_gain: float = 0.01,
+    validation: list[Example] | None = None,
 ) -> Result:
     """Hill-climb ``initial_prompt`` toward a higher average score.
 
@@ -179,13 +220,30 @@ def optimize(
     sub-threshold failures but a mediocre average keeps going, showing the
     proposer its weakest examples instead.
 
+    ``examples`` is the training set: every score the search compares is
+    measured on it. If ``validation`` is given, the initial and the final
+    best prompt are each scored once on it after the search ends, reported
+    as ``Result.initial_val_score`` and ``Result.val_score``. The proposer
+    never sees validation examples.
+
+    If every training example errors on the initial prompt, the run raises
+    ``EvaluationFailedError``. A ``FatalLLMError`` from any call aborts it
+    immediately.
+
     Rounds that produce no candidate to evaluate -- a failed proposer call, or
     a malformed response with no prompt delimiters -- are recorded in the
     trace as stalled rounds (prompt and score unchanged) rather than silently
     skipped, so trace round numbers stay contiguous and ``Result.rounds``
     counts every round attempted.
     """
+    if not examples:
+        raise ValueError("optimize() needs at least one training example")
     evaluation = _evaluate(llm, task_model, initial_prompt, examples, scorer)
+    if evaluation.errors == len(examples):
+        raise EvaluationFailedError(
+            f"all {len(examples)} examples errored on the initial prompt; "
+            "check credentials, model names and the scorer (see the warnings above)"
+        )
     best_prompt = initial_prompt
     best_score = evaluation.score
     trace = [_trace_round(0, initial_prompt, evaluation)]
@@ -249,6 +307,20 @@ def optimize(
                 logger.info("No improvement for %d consecutive rounds; stopping.", stalled_rounds)
                 break
 
+    initial_val_score: float | None = None
+    val_score: float | None = None
+    if validation:
+        initial_val_score = _evaluate(llm, task_model, initial_prompt, validation, scorer).score
+        if best_prompt == initial_prompt:
+            val_score = initial_val_score
+        else:
+            val_score = _evaluate(llm, task_model, best_prompt, validation, scorer).score
+
     return Result(
-        best_prompt=best_prompt, best_score=best_score, rounds=len(trace) - 1, trace=trace
+        best_prompt=best_prompt,
+        best_score=best_score,
+        rounds=len(trace) - 1,
+        trace=trace,
+        initial_val_score=initial_val_score,
+        val_score=val_score,
     )
