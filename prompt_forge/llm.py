@@ -99,16 +99,25 @@ def _fatal_error_types() -> tuple[type[Exception], ...]:
 
     Imported lazily so fakes and alternate providers never need ``anthropic``.
     """
+    # TypeError is what the SDK raises before sending anything when no API key
+    # or other credentials are configured (and for malformed request
+    # arguments). Neither will succeed on a retry.
+    fatal: tuple[type[Exception], ...] = (TypeError,)
     try:
         import anthropic
     except ImportError:  # pragma: no cover - anthropic is a declared dependency
-        return ()
-    return (
+        return fatal
+    fatal += (
         anthropic.AuthenticationError,
         anthropic.PermissionDeniedError,
         anthropic.NotFoundError,
         anthropic.BadRequestError,
     )
+    # Newer SDKs raise CredentialsError for unreadable credential sources.
+    credentials_error = getattr(anthropic, "CredentialsError", None)
+    if isinstance(credentials_error, type) and issubclass(credentials_error, Exception):
+        fatal += (credentials_error,)
+    return fatal
 
 
 def _extract_text(response: Any) -> str:
