@@ -4,139 +4,111 @@
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
-**prompt-forge** automatically improves a prompt by hill-climbing: run it on labeled examples, score the outputs, ask an LLM to fix the failures, and keep the result only if it's actually better.
-
-Give it a starting prompt, a handful of labeled examples, and a scorer. It returns the best prompt it found, plus a full trace of every round so you can see exactly how it got there.
-
-## What it does
-
-1. **Evaluate.** Run the current prompt over every labeled example through the task model and score each output.
-2. **Diagnose.** Collect the examples that scored below a failure threshold, with their input and the wrong output.
-3. **Propose.** Show a proposer model the current prompt and a sample of its failures; ask it to write an improved prompt that generalizes, not one that just memorizes the examples.
-4. **Compare.** Evaluate the candidate on the same examples. Keep it only if it beats the current best by at least `min_gain`; otherwise it's a stalled round.
-5. **Repeat** until the prompt has no failures left to learn from, the round budget runs out, or two consecutive rounds fail to improve anything.
-
-The result is the best prompt found, its score, and a round-by-round trace -- not just a black box that hands back a string.
-
-## Why prompt-forge instead of DSPy or promptfoo?
-
-DSPy (and OPRO-style optimizers generally) also rewrite prompts from feedback, but they live inside a heavyweight framework you adopt wholesale -- signatures, modules, compilers, its own program model. promptfoo is excellent at *evaluating* prompts against test cases, but it doesn't close the loop and rewrite them for you. prompt-forge is deliberately the smallest thing that does close the loop: under 600 lines across five modules, a handful of dependencies, one `optimize()` function, and a full round-by-round trace of what changed and why. If you need multi-stage pipelines or program synthesis, use DSPy; if you need a prompt that stops failing your examples by this afternoon, this is the tool-shaped version of that.
-
-## Architecture
-
-| Module | Responsibility |
-|---|---|
-| `prompt_forge/models.py` | Pydantic models for examples, candidates, round traces, and the final result. |
-| `prompt_forge/llm.py` | Thin wrapper around the Anthropic SDK. Everything else in the library depends on its `complete(model, system, user)` interface, not on `anthropic` directly. |
-| `prompt_forge/scorers.py` | Pluggable scoring: `ExactMatchScorer` for deterministic tasks, `LLMJudgeScorer` for anything that needs semantic judgment. |
-| `prompt_forge/optimizer.py` | The hill-climbing loop itself: evaluate, diagnose, propose, compare, repeat. |
-| `prompt_forge/cli.py` | A `typer` CLI that loads examples from YAML and runs the loop end to end. |
+prompt-forge improves a prompt by hill-climbing on labeled training examples and then reports how the winning prompt scores on validation examples the search never saw.
 
 ```
-                    ┌─────────────────────────────┐
-                    │   evaluate(prompt, examples) │
-                    │   -> average score, failures │
-                    └───────────────┬──────────────┘
-                                    │
-                    failures empty? │ yes -> done
-                                    │ no
-                                    v
-                    ┌─────────────────────────────┐
-                    │ propose(prompt, failures)    │
-                    │ -> candidate prompt          │
-                    └───────────────┬──────────────┘
-                                    │
-                                    v
-                    ┌─────────────────────────────┐
-                    │ evaluate(candidate, examples)│
-                    └───────────────┬──────────────┘
-                                    │
-                score improved by   │
-                >= min_gain?        │
-                 yes: keep, reset   │  no: count a stalled round
-                 stall counter      │  2 stalls in a row -> stop
-                                    │
-                                    v
-                        loop until max_rounds
+$ python examples/offline_demo.py
+
+Train score: 1.00 on 5 example(s) (after 1 round(s))
+Validation score: 0.50 on 2 held-out example(s) (initial prompt: 0.00)
+
+Best prompt:
+Classify the sentiment of the input as exactly one of: positive, negative, or neutral. Respond with only the single lowercase label.
+
+Trace:
+round   train  failures
+    0    0.70  0
+    1    1.00  0
 ```
 
-## Design notes
-
-- **Pluggable scoring.** `Scorer` is a `Protocol`, not a base class. Exact-match tasks (classification, extraction) get `ExactMatchScorer`; open-ended tasks get `LLMJudgeScorer`, which asks a model to rate the output on a 0-10 scale and parses the number back out of whatever free-form text comes back (an explicit `X/10` wins; a bare number is read on the instructed 0-10 scale). Bring your own scorer for anything else -- the optimizer doesn't care.
-- **Fully testable offline.** The optimizer and scorers only ever depend on an object with a `complete(model, system, user)` method (`LLMProtocol`). Tests inject a scripted `FakeLLM` instead of a real Anthropic client, so the entire hill-climbing loop -- including multi-round improvement, early stopping, and the CLI itself -- is verified without a network call or an API key.
-- **Native system parameter, with an escape hatch.** `LLM.complete` sends system text through the API's native `system` parameter by default, which is how the models are trained to receive instructions. `LLM(fold_system_into_user=True)` is a compatibility escape hatch that prepends the system text to the user message instead, for API gateways that strip or drop the `system` field.
-- **Budget and early-stop control.** `max_rounds` caps total cost; `min_gain` sets the bar for what counts as real improvement (so noise doesn't get mistaken for progress); the search also gives up after two consecutive stalled rounds rather than grinding through a budget that isn't paying off.
-- **Defensive evaluation, everywhere.** A single example that throws (a malformed response, a transient API error) is scored 0.0 and logged -- it never crashes the run. A failed proposer call gets the same treatment: it costs one stalled round, and the run still returns the best prompt found so far.
+That output comes from the real CLI running on the 7 bundled sentiment examples, with the model swapped for a scripted keyword heuristic (see [`examples/offline_demo.py`](examples/offline_demo.py)), so it needs no API key. The numbers only describe that heuristic. They do show the reason for the validation set: the rewrite reaches 1.00 on the 5 training examples and 0.50 on the 2 held-out ones.
 
 ## Quickstart
 
 ```bash
+git clone https://github.com/ssh071102-code/prompt-forge.git
+cd prompt-forge
+python -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -e ".[dev]"
+python examples/offline_demo.py    # offline, prints the block above
+pytest                             # offline, 61 tests
 ```
 
-Provide your API key either through a `.env` file (loaded automatically at CLI startup):
+To run against Anthropic models, provide an API key, either in `secrets/.env` (loaded at CLI startup) or in the environment. Variables already set in the environment take precedence.
 
 ```bash
 cp secrets/.env.example secrets/.env   # then fill in ANTHROPIC_API_KEY
-```
-
-or directly in the environment:
-
-```bash
-export ANTHROPIC_API_KEY=sk-ant-...    # bash/zsh
-```
-
-```powershell
-$env:ANTHROPIC_API_KEY = "sk-ant-..."  # PowerShell
-```
-
-Variables already set in the process environment take precedence over `secrets/.env`. Then:
-
-```bash
 prompt-forge optimize examples/sentiment.yaml --prompt "Classify the sentiment of the input."
 ```
 
-Illustrative output (what a run looks like -- real scores depend on the models; prompt text wrapped for readability):
+A missing or rejected key, or an unknown model name, stops the run with `Error: ...` and exit code 1.
+
+## How it works
+
+1. **Split.** Shuffle the examples with a fixed seed and hold out 30% (`--val-split`) as a validation set, or read validation examples from a separate file (`--val`).
+2. **Evaluate.** Run the current prompt over every training example through the task model and score each output.
+3. **Diagnose.** Collect the training examples that scored below a failure threshold. If none did but the average is below 0.99, use the lowest-scoring ones instead.
+4. **Propose.** Show a proposer model the current prompt and up to 5 of those examples, and ask for an improved prompt that fixes the instruction without hardcoding answers.
+5. **Compare.** Score the candidate on the training examples. Keep it if it beats the current best by at least `min_gain`, otherwise count a stalled round. A proposal identical to the current prompt is counted as stalled without being re-evaluated.
+6. **Repeat** until every training example scores 0.99 or more, `max_rounds` runs out, or two rounds in a row stall.
+7. **Validate.** Score the initial prompt and the best prompt once each on the validation set.
+
+The proposer never sees validation examples, and no search decision uses them. The training score is therefore optimistic; the validation score is the one to compare prompts by.
 
 ```
-Best score: 0.96 (after 2 round(s))
-
-Best prompt:
-Classify the sentiment of the input as exactly one of: positive, negative,
-or neutral. Respond with only the single lowercase label and nothing else.
-Judge only the emotional tone the author expresses, not whether the
-described product or event was itself good or bad. If praise and criticism
-are mixed, pick the sentiment that dominates the author's overall verdict,
-and reserve neutral for genuinely indifferent statements.
-
-Trace:
-round   score  failures
-    0    0.57  3
-    1    0.81  1
-    2    0.96  0
+                ┌──────────────────────────────┐
+                │ split(examples) -> train, val │
+                └───────────────┬──────────────┘
+                                v
+                ┌──────────────────────────────┐
+                │ evaluate(prompt, train)       │
+                └───────────────┬──────────────┘
+                                v
+                ┌──────────────────────────────┐
+                │ propose(prompt, failures)     │<──┐
+                └───────────────┬──────────────┘   │
+                                v                  │
+                ┌──────────────────────────────┐   │
+                │ evaluate(candidate, train)    │   │ until max_rounds,
+                │ keep if gain >= min_gain      │───┘ 2 stalls, or 0.99
+                └───────────────┬──────────────┘
+                                v
+                ┌──────────────────────────────┐
+                │ evaluate(initial, val)        │
+                │ evaluate(best, val)           │
+                └──────────────────────────────┘
 ```
 
-(That block is a captured run of the real CLI against a scripted stand-in model: with the 7 bundled sentiment examples, 4/7 exact matches round to 0.57, then 0.81, then 0.96 as failures drop from 3 to 0.)
+## Error handling
 
-### Options
+- A single example that raises a transient error (a timeout, a rate limit, a malformed response) is scored 0.0, logged as a warning, and the run continues.
+- Errors that would fail on every call abort the run: authentication, permission, not-found and bad-request API errors, and missing credentials. `LLM` raises these as `FatalLLMError`.
+- If every training example errors on the initial prompt, the run stops with `EvaluationFailedError`. This catches configuration problems that come from a custom provider or scorer and are not recognised as fatal.
+- A failed or malformed proposer response costs one stalled round and is recorded in the trace.
+
+## Options
 
 | Flag | Default | Meaning |
 |---|---|---|
+| `--val-split` | `0.3` | Fraction of the examples held out for validation. `0` disables validation. |
+| `--val` | none | Separate YAML file of validation examples. All of `EXAMPLES_PATH` is then used for training. |
+| `--seed` | `0` | Seed for the train/validation shuffle. |
 | `--task-model` | `claude-haiku-4-5` | Model that runs the prompt on each example. |
 | `--proposer-model` | `claude-opus-5` | Model that writes improved prompt candidates. |
-| `--judge-model` | `claude-opus-5` | Model used by the LLM judge (only with `--judge`). Defaults to a stronger model than the task model, so the weakest model never grades its own output. |
+| `--judge-model` | `claude-opus-5` | Model used by the LLM judge (only with `--judge`). It defaults to a stronger model than the task model so a model does not grade its own output. |
 | `--max-rounds` | `5` | Maximum optimization rounds. |
-| `--min-gain` | `0.01` | Minimum score improvement required to keep a candidate. |
+| `--min-gain` | `0.01` | Minimum training-score improvement required to keep a candidate. |
 | `--judge` | off | Score outputs with an LLM judge instead of exact match. |
 
-Three more knobs live as constants in `prompt_forge/optimizer.py`: `FAILURE_THRESHOLD` (0.5 -- scores below this count as failures), `MAX_FAILURE_SAMPLES` (5 -- failures shown to the proposer and kept per trace round), and `STALL_LIMIT` (2 -- consecutive no-improvement rounds before giving up).
+Three more knobs are constants in `prompt_forge/optimizer.py`: `FAILURE_THRESHOLD` (0.5, scores below this count as failures), `MAX_FAILURE_SAMPLES` (5, examples shown to the proposer and kept per trace round) and `STALL_LIMIT` (2, consecutive stalled rounds before giving up).
 
 ## Use as a library
 
-Everything is importable from the package root, and any object with a 3-line `score` method is a valid scorer:
+Everything is importable from the package root. Any object with a `score(output, example) -> float` method is a valid scorer.
 
 ```python
-from prompt_forge import LLM, Example, optimize
+from prompt_forge import LLM, Example, optimize, split_examples
 
 class KeywordScorer:
     def score(self, output: str, example: Example) -> float:
@@ -144,38 +116,59 @@ class KeywordScorer:
 
 examples = [
     Example(input="The refund never arrived.", expected="billing"),
+    Example(input="I was charged twice this month.", expected="billing"),
     Example(input="The app crashes on launch.", expected="bug"),
+    Example(input="Search returns a blank page.", expected="bug"),
 ]
+train, val = split_examples(examples, 0.5, seed=0)
 
 result = optimize(
     "Tag the support ticket with one topic label.",
-    examples, KeywordScorer(), LLM(),  # LLM() reads ANTHROPIC_API_KEY from the env
+    train, KeywordScorer(), LLM(),  # LLM() reads ANTHROPIC_API_KEY from the env
     task_model="claude-haiku-4-5", proposer_model="claude-opus-5",
+    validation=val,
 )
-print(f"{result.best_score:.2f}", result.best_prompt)
+print(f"train {result.best_score:.2f}, validation {result.val_score:.2f}")
+print(result.best_prompt)
 ```
 
-`result` is a pydantic model carrying `best_prompt`, `best_score`, `rounds`, and the full `trace` (per-round prompt, score, failure samples, and total failure count).
+`result` is a pydantic model with `best_prompt`, `best_score` (training), `val_score` and `initial_val_score` (`None` without a validation set), `rounds`, and the per-round `trace`.
 
-## Limitations & cost
+## Modules
 
-- **Greedy search.** Hill-climbing keeps only strict improvements, so it can park in a local optimum: a rewrite that fixes three failures but temporarily breaks one scoring pattern gets rejected. If the trace shows early stalling, try a different starting prompt rather than more rounds.
-- **Small example sets overfit.** With 5-10 examples, a "better" prompt may just fit those examples' quirks. For decisions that matter, use 20+ examples and hold some out for a manual check.
-- **LLM-judge scores are noisy.** The same output can get a 6 or an 8 on different calls. Keep `min_gain` meaningfully above the judge's noise floor so the search doesn't chase noise, and prefer `ExactMatchScorer` whenever the task allows it.
-- **Cost shape.** Round 0 costs one task-model call per example. Every later round costs one proposer call plus one task-model call per example -- and with `--judge`, one judge call per example on top. Total calls grow linearly in `max_rounds * len(examples)`; `max_rounds` and the stall limit are the cost caps.
+| Module | Responsibility |
+|---|---|
+| `prompt_forge/models.py` | Pydantic models for examples, round traces and the result. |
+| `prompt_forge/llm.py` | Thin wrapper around the Anthropic SDK. The rest of the package depends only on its `complete(model, system, user)` interface (`LLMProtocol`). |
+| `prompt_forge/scorers.py` | `ExactMatchScorer` (1.0 exact, 0.7 when the answer appears as a whole word and is not negated, else 0.0) and `LLMJudgeScorer` (a 0-10 rating normalised to 0-1). |
+| `prompt_forge/optimizer.py` | The train/validation split and the hill-climbing loop. |
+| `prompt_forge/cli.py` | A `typer` CLI that loads YAML examples and prints the report. |
 
-## Tests
+`LLM.complete` sends system text through the API's `system` parameter. `LLM(fold_system_into_user=True)` prepends it to the user message instead, for API gateways that drop the `system` field.
 
-The whole suite (28 tests) runs offline against a scripted `FakeLLM` -- no API key, no network access.
+## Limitations and cost
+
+- **Small validation sets are coarse.** With the 7 bundled examples the validation set has 2, so its score can only move in steps of about 0.5. Use 20 or more examples, or pass a larger `--val` file, before trusting a comparison.
+- **Greedy search.** Only candidates that beat the best training score by `min_gain` are kept, so the search can stop at a local optimum. If the trace stalls early, try a different starting prompt.
+- **One validation pass.** The validation score is measured once at the end. It is not used for early stopping or model selection between rounds.
+- **LLM-judge scores are noisy.** The same output can get a 6 or an 8 on different calls. Keep `min_gain` above the judge's noise and prefer `ExactMatchScorer` when the task allows it.
+- **Anthropic only out of the box.** Other providers need an adapter with a `complete(model, system, user)` method.
+- **Cost.** Round 0 costs one task call per training example. Each later round costs one proposer call plus one task call per training example, and with `--judge` one judge call per example on top. Validation adds up to two task calls per validation example.
+
+## Development
 
 ```bash
 pip install -e ".[dev]"
-pytest
+pytest          # 61 tests, offline
 ruff check .
+mypy            # strict, configured in pyproject.toml
 ```
 
-Coverage includes: scorer correctness (exact match and LLM-judge rating normalization), multi-round score improvement, early stopping on stalled rounds, survival of both per-example errors and a failed proposer call, the undelimited-proposer-response fallback, trace failure capping, and the CLI end to end (via a monkeypatched LLM factory), including example-file validation errors. The Anthropic wrapper itself is tested against a mocked HTTP layer (via `respx`) to confirm the real SDK request/response path, the native `system` parameter, and the fold-in escape hatch.
+Tests use a scripted `FakeLLM` for the optimizer, scorers and CLI, and a fake Anthropic client object for `LLM`, so the suite makes no network calls and needs no API key. CI runs all three commands on Python 3.10 and 3.12.
 
-## Tech
+## AI assistance
+This project was built with AI assistance (Claude Code). Commits it co-authored carry a `Co-Authored-By` trailer.
 
-Python · [pydantic](https://docs.pydantic.dev/) · [Anthropic SDK](https://github.com/anthropics/anthropic-sdk-python) · [typer](https://typer.tiangolo.com/) · [python-dotenv](https://github.com/theskumar/python-dotenv) · [pytest](https://docs.pytest.org/) · [ruff](https://docs.astral.sh/ruff/)
+## License
+
+MIT
