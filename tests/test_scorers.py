@@ -87,6 +87,11 @@ def test_exact_match_scorer_no_credit_for_negated_answer() -> None:
         ("I would rate it 7 out of 10", 0.7),
         # An explicit fraction still wins outright.
         ("On a scale of 0 to 10: 6/10", 0.6),
+        # Explicit rating forms win over numbers that come after them.
+        ("7 of 10", 0.7),
+        ("Score: 8. There are 2 minor errors.", 0.8),
+        ("Rating: 6 -- 3 issues found", 0.6),
+        ("8 out of 10, with 2 small mistakes", 0.8),
     ],
 )
 def test_judge_scorer_ignores_scale_preamble(judge_text: str, expected_score: float) -> None:

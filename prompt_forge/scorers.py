@@ -80,10 +80,10 @@ class LLMJudgeScorer:
 
     The judge is instructed to answer with a single number on a 0-10 scale,
     but real responses are messy ("I'd rate this a 7/10."), so the rating is
-    extracted with a regex rather than a strict parse. Explicit ``X/10``
-    fractions are preferred; otherwise the first bare number is read on the
-    instructed 0-10 scale and divided by 10. The result is always clamped
-    to ``[0, 1]``.
+    extracted with a regex rather than a strict parse. Explicit rating forms
+    (``X/10``, ``X of 10``, ``X out of 10``, ``Score: X``, ``Rating: X``) are
+    preferred; otherwise the last bare number is read on the instructed 0-10
+    scale and divided by 10. The result is always clamped to ``[0, 1]``.
     """
 
     JUDGE_INSTRUCTIONS = (
@@ -117,25 +117,42 @@ _SCALE_MENTION = re.compile(
 )
 
 
+# "7/10", "7 of 10", "7 out of 10": the rating stated as a fraction of 10.
+_FRACTION = re.compile(r"(-?\d+(?:\.\d+)?)\s*(?:/|\bout\s+of\b|\bof\b)\s*10\b", re.IGNORECASE)
+
+# "Score: 8", "Rating = 6", "score is 7": a labelled rating. Searched after the
+# scale preamble is stripped, so "Score of 0 to 10: 7" does not read as 0.
+_LABELLED = re.compile(r"\b(?:score|rating)\s*(?::|=|\bis\b)?\s*(-?\d+(?:\.\d+)?)", re.IGNORECASE)
+
+_NUMBER = re.compile(r"-?\d+(?:\.\d+)?")
+
+
 def _parse_rating(text: str) -> float:
     """Extract a 0-10 judge rating from free-form text, normalized to [0, 1].
 
-    An explicit ``X/10`` fraction wins over any other number in the text.
-    Otherwise scale-preamble phrases ("on a scale of 0 to 10, ...") are
-    stripped first, and the LAST remaining number is read as the verdict --
+    Explicit rating forms are read first, in this order: a fraction of 10
+    (``X/10``, ``X of 10``, ``X out of 10``), then a labelled rating
+    (``Score: X``, ``Rating: X``). Numbers after the rating ("Score: 8.
+    There are 2 minor errors.") are therefore not mistaken for it. Without
+    an explicit form, scale-preamble phrases ("on a scale of 0 to 10, ...")
+    are stripped and the LAST remaining number is read as the verdict --
     chatty judges state the scale before the rating, so the first number in
     the raw text is often the scale's lower bound, not the answer. A bare
     number is read on the instructed 0-10 scale and divided by 10 -- a bare
     "1" means 1/10 (near-total failure), never a perfect normalized score.
     The result is clamped to ``[0, 1]``.
     """
-    fraction = re.search(r"(-?\d+(?:\.\d+)?)\s*/\s*10\b", text)
+    fraction = _FRACTION.search(text)
     if fraction:
         value = float(fraction.group(1))
     else:
         stripped = _SCALE_MENTION.sub(" ", text)
-        numbers = re.findall(r"-?\d+(?:\.\d+)?", stripped)
-        if not numbers:
-            return 0.0
-        value = float(numbers[-1])
+        labelled = _LABELLED.search(stripped)
+        if labelled:
+            value = float(labelled.group(1))
+        else:
+            numbers = _NUMBER.findall(stripped)
+            if not numbers:
+                return 0.0
+            value = float(numbers[-1])
     return max(0.0, min(1.0, value / 10.0))
