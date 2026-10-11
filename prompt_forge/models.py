@@ -48,7 +48,9 @@ class Result(BaseModel):
     against, so it is optimistically biased. ``val_score`` and
     ``initial_val_score`` are the best and the initial prompt scored on the
     validation examples, which the search never saw. Both are ``None`` when
-    no validation set was given.
+    no validation set was given. ``initial_val_errors`` and ``val_errors``
+    count the validation examples that errored (and were scored 0.0) in each
+    of those two evaluations.
     """
 
     best_prompt: str
@@ -57,3 +59,5 @@ class Result(BaseModel):
     trace: list[RoundTrace] = Field(default_factory=list)
     initial_val_score: float | None = None
     val_score: float | None = None
+    initial_val_errors: int = 0
+    val_errors: int = 0

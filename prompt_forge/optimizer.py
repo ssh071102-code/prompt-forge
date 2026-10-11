@@ -48,7 +48,7 @@ PROMPT_BLOCK_END = "<<<END_PROMPT>>>"
 
 
 class EvaluationFailedError(RuntimeError):
-    """Every example errored while evaluating the initial prompt.
+    """Every example errored while evaluating a prompt on the training or validation set.
 
     Scoring those as 0.0 would start the search from a meaningless baseline.
     When nothing at all succeeds the cause is almost always configuration
@@ -140,6 +140,15 @@ def _evaluate(
     return _Evaluation(score=average, failures=failures, weakest=weakest, errors=errors)
 
 
+def _require_a_success(evaluation: _Evaluation, n_examples: int, what: str) -> None:
+    """Raise ``EvaluationFailedError`` if every one of ``n_examples`` errored."""
+    if evaluation.errors == n_examples:
+        raise EvaluationFailedError(
+            f"all {n_examples} {what}; "
+            "check credentials, model names and the scorer (see the warnings above)"
+        )
+
+
 def _build_proposer_prompt(current_prompt: str, failures: list[str]) -> str:
     """Build the request asking the proposer model for an improved prompt."""
     sample = failures[:MAX_FAILURE_SAMPLES]
@@ -226,9 +235,11 @@ def optimize(
     as ``Result.initial_val_score`` and ``Result.val_score``. The proposer
     never sees validation examples.
 
-    If every training example errors on the initial prompt, the run raises
-    ``EvaluationFailedError``. A ``FatalLLMError`` from any call aborts it
-    immediately.
+    If every training example errors on the initial prompt, or every
+    validation example errors in either validation evaluation, the run raises
+    ``EvaluationFailedError``. Partial validation errors are counted in
+    ``Result.initial_val_errors`` and ``Result.val_errors``. A
+    ``FatalLLMError`` from any call aborts it immediately.
 
     Rounds that produce no candidate to evaluate -- a failed proposer call, or
     a malformed response with no prompt delimiters -- are recorded in the
@@ -239,11 +250,7 @@ def optimize(
     if not examples:
         raise ValueError("optimize() needs at least one training example")
     evaluation = _evaluate(llm, task_model, initial_prompt, examples, scorer)
-    if evaluation.errors == len(examples):
-        raise EvaluationFailedError(
-            f"all {len(examples)} examples errored on the initial prompt; "
-            "check credentials, model names and the scorer (see the warnings above)"
-        )
+    _require_a_success(evaluation, len(examples), "examples errored on the initial prompt")
     best_prompt = initial_prompt
     best_score = evaluation.score
     trace = [_trace_round(0, initial_prompt, evaluation)]
@@ -309,12 +316,18 @@ def optimize(
 
     initial_val_score: float | None = None
     val_score: float | None = None
+    initial_val_errors = 0
+    val_errors = 0
     if validation:
-        initial_val_score = _evaluate(llm, task_model, initial_prompt, validation, scorer).score
+        initial_val = _evaluate(llm, task_model, initial_prompt, validation, scorer)
+        _require_a_success(initial_val, len(validation), "validation examples errored")
         if best_prompt == initial_prompt:
-            val_score = initial_val_score
+            best_val = initial_val
         else:
-            val_score = _evaluate(llm, task_model, best_prompt, validation, scorer).score
+            best_val = _evaluate(llm, task_model, best_prompt, validation, scorer)
+            _require_a_success(best_val, len(validation), "validation examples errored")
+        initial_val_score, initial_val_errors = initial_val.score, initial_val.errors
+        val_score, val_errors = best_val.score, best_val.errors
 
     return Result(
         best_prompt=best_prompt,
@@ -323,4 +336,6 @@ def optimize(
         trace=trace,
         initial_val_score=initial_val_score,
         val_score=val_score,
+        initial_val_errors=initial_val_errors,
+        val_errors=val_errors,
     )

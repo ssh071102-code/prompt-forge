@@ -84,7 +84,8 @@ The proposer never sees validation examples, and no search decision uses them. T
 
 - A single example that raises a transient error (a timeout, a rate limit, a malformed response) is scored 0.0, logged as a warning, and the run continues.
 - Errors that would fail on every call abort the run: authentication, permission, not-found and bad-request API errors, and missing credentials. `LLM` raises these as `FatalLLMError`.
-- If every training example errors on the initial prompt, the run stops with `EvaluationFailedError`. This catches configuration problems that come from a custom provider or scorer and are not recognised as fatal.
+- If every training example errors on the initial prompt, or every validation example errors when the initial or the best prompt is scored on the validation set, the run stops with `EvaluationFailedError` and the CLI exits with status 1. This catches configuration problems that come from a custom provider or scorer and are not recognised as fatal.
+- If only some validation examples error, they are scored 0.0, counted in `Result.initial_val_errors` and `Result.val_errors`, and the CLI prints a warning under the validation score.
 - A failed or malformed proposer response costs one stalled round and is recorded in the trace.
 
 ## Options
@@ -132,7 +133,7 @@ print(f"train {result.best_score:.2f}, validation {result.val_score:.2f}")
 print(result.best_prompt)
 ```
 
-`result` is a pydantic model with `best_prompt`, `best_score` (training), `val_score` and `initial_val_score` (`None` without a validation set), `rounds`, and the per-round `trace`.
+`result` is a pydantic model with `best_prompt`, `best_score` (training), `val_score` and `initial_val_score` (`None` without a validation set), `val_errors` and `initial_val_errors`, `rounds`, and the per-round `trace`.
 
 ## Modules
 

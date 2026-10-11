@@ -197,3 +197,52 @@ def test_cli_fatal_llm_error_exits_nonzero_with_message(
 
     assert result.exit_code == 1
     assert "Error: invalid x-api-key" in _all_output(result)
+
+
+def test_cli_all_validation_errors_exits_nonzero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    val_path = tmp_path / "val.yaml"
+    val_path.write_text("- input: 'VALIDATION_ONLY'\n  expected: positive\n", encoding="utf-8")
+
+    def task_fn(user: str) -> str:
+        if "VALIDATION_ONLY" in user:
+            raise RuntimeError("rate limited")
+        return "positive"
+
+    examples_path = _write_examples(tmp_path)
+    result = _run(
+        [str(examples_path), "--prompt", "p", "--val", str(val_path), "--max-rounds", "0"],
+        FakeLLM(task_fn=task_fn),
+        monkeypatch,
+    )
+
+    assert result.exit_code == 1
+    assert "Error: all 1 validation examples errored" in _all_output(result)
+
+
+def test_cli_reports_partial_validation_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    val_path = tmp_path / "val.yaml"
+    val_path.write_text(
+        "- input: 'VALIDATION_FLAKY'\n  expected: positive\n"
+        "- input: 'fine'\n  expected: positive\n",
+        encoding="utf-8",
+    )
+
+    def task_fn(user: str) -> str:
+        if "VALIDATION_FLAKY" in user:
+            raise RuntimeError("timeout")
+        return "positive"
+
+    examples_path = _write_examples(tmp_path)
+    result = _run(
+        [str(examples_path), "--prompt", "p", "--val", str(val_path), "--max-rounds", "0"],
+        FakeLLM(task_fn=task_fn),
+        monkeypatch,
+    )
+
+    assert result.exit_code == 0, _all_output(result)
+    assert "Validation score: 0.50 on 2 held-out example(s)" in result.output
+    assert "1 of 2 validation example(s) errored and scored 0.0" in result.output

@@ -482,3 +482,56 @@ def test_no_validation_leaves_val_scores_empty() -> None:
 
     assert result.val_score is None
     assert result.initial_val_score is None
+
+
+def test_every_validation_example_erroring_aborts() -> None:
+    # Training succeeds but every validation request fails. Reporting a 0.00
+    # validation score would look like a real (terrible) measurement.
+    def task_fn(user: str) -> str:
+        if "VALIDATION_ONLY" in user:
+            raise RuntimeError("rate limited")
+        return "positive"
+
+    validation = [
+        Example(input="VALIDATION_ONLY a", expected="positive"),
+        Example(input="VALIDATION_ONLY b", expected="negative"),
+    ]
+
+    with pytest.raises(EvaluationFailedError, match="all 2 validation examples errored"):
+        optimize(
+            "PROMPT_V0",
+            EXAMPLES,
+            ExactMatchScorer(),
+            FakeLLM(task_fn=task_fn),
+            task_model=TASK_MODEL,
+            proposer_model=PROPOSER_MODEL,
+            max_rounds=0,
+            validation=validation,
+        )
+
+
+def test_partial_validation_errors_are_counted_in_the_result() -> None:
+    def task_fn(user: str) -> str:
+        if "VALIDATION_FLAKY" in user:
+            raise RuntimeError("timeout")
+        return "positive"
+
+    validation = [
+        Example(input="VALIDATION_FLAKY a", expected="positive"),
+        Example(input="fine b", expected="positive"),
+    ]
+
+    result = optimize(
+        "PROMPT_V0",
+        EXAMPLES,
+        ExactMatchScorer(),
+        FakeLLM(task_fn=task_fn),
+        task_model=TASK_MODEL,
+        proposer_model=PROPOSER_MODEL,
+        max_rounds=0,
+        validation=validation,
+    )
+
+    assert result.val_score == 0.5
+    assert result.val_errors == 1
+    assert result.initial_val_errors == 1

@@ -73,8 +73,15 @@ def _print_report(result: Result, n_train: int, n_val: int) -> None:
     if result.val_score is not None and result.initial_val_score is not None:
         typer.echo(
             f"Validation score: {result.val_score:.2f} on {n_val} held-out example(s) "
-            f"(initial prompt: {result.initial_val_score:.2f})\n"
+            f"(initial prompt: {result.initial_val_score:.2f})"
         )
+        for label, errors in (("best", result.val_errors), ("initial", result.initial_val_errors)):
+            if errors:
+                typer.echo(
+                    f"Warning: {errors} of {n_val} validation example(s) errored and scored 0.0 "
+                    f"for the {label} prompt; the validation score above is pessimistic"
+                )
+        typer.echo("")
     else:
         typer.echo("Validation score: n/a (no validation set; the train score is optimistic)\n")
     typer.echo("Best prompt:")
