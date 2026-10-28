@@ -32,7 +32,7 @@ python -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -e ".[dev]"
 python examples/offline_demo.py    # offline, prints the block above
-pytest                             # offline, 61 tests
+pytest                             # offline, 69 tests
 ```
 
 To run against Anthropic models, provide an API key, either in `secrets/.env` (loaded at CLI startup) or in the environment. Variables already set in the environment take precedence.
@@ -160,15 +160,12 @@ print(result.best_prompt)
 
 ```bash
 pip install -e ".[dev]"
-pytest          # 61 tests, offline
+pytest          # 69 tests, offline
 ruff check .
 mypy            # strict, configured in pyproject.toml
 ```
 
 Tests use a scripted `FakeLLM` for the optimizer, scorers and CLI, and a fake Anthropic client object for `LLM`, so the suite makes no network calls and needs no API key. CI runs all three commands on Python 3.10 and 3.12.
-
-## AI assistance
-This project was built with AI assistance (Claude Code). Commits it co-authored carry a `Co-Authored-By` trailer.
 
 ## License
 
